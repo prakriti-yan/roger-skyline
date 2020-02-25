@@ -1,0 +1,415 @@
+---------Deployment----------
+
+Install Debian (on virtual machine or regular machine)
+with standard settings (ssh and standard packages).
+In this virtual machine user settings are:
+Root password is: root
+User is: yyan
+Nonroot password is: yyan
+
+Change network adapter 1 to Bridged Adapter to be able to connect with static IP.
+
+Login into Debian with yyan user.
+check IP address with "ip a" and login in terminal with SSH yyan@IP_address.
+
+
+----Update and install package----
+
+>apt-get update -y && apt-get upgrade –y
+>apt-get install sudo vim ufw portsentry fail2ban apache2 mailutils –y
+
+----------Configure SUDO-----------
+
+login as root by:
+>su
+
+edit the file "vim /etc/sudoers" to have yyan added in user privilege specification:
+"yyan   ALL=(ALL:ALL) NOPASSWD:ALL"
+
+------Setup Static IP--------------
+
+Check current setting with:
+> cat /etc/network/interfaces
+
+//output
+
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+source /etc/network/interfaces.d/*
+# The loopback network interface
+auto lo
+iface lo inet loopback
+# The primary network interface
+allow-hotplug enp0s3
+iface enp0s3 inet dhcp
+
+// end of output
+
+Remove the last line and change “allow-hotplug” to “auto” with:
+
+> sudo vim  cat /etc/network/interfaces
+Or copy file resource/interfaces
+
+Create and edit file /etc/network/interfaces.d/enp0s3 with:
+
+> sudo vim /etc/network/interfaces.d/enp0s3
+
+//CONTENT
+
+iface enp0s3 inet static
+	address 10.11.200.247
+	netmask 255.255.255.252
+	gateway 10.11.254.254
+
+//END OF CONTENT
+
+Or copy file resource/interfaces.d/enp0s3
+
+Restart the network service to make changes:
+> sudo service networking restart
+
+Check the IP address with:
+> ip a
+
+Now the SSH service can be remotely connected by:
+> ssh yyan@10.11.200.247
+
+
+-------------------Change SSH default Port---------------------
+
+> sudo vim /etc/ssh/sshd_config
+
+Change line “Port 22” to “Port 53425”
+
+The Well-Known Ports are those from 0 through 1023 and SHOULD NOT be used. Registered Ports are those from 1024 through 49151 should also be avoided too. Dynamic and/or Private Ports are those from 49152 through 65535 and can be used.
+
+Restart the ssh service:
+> sudo service sshd restart
+
+When login to SSH service in terminal, we have to login with:
+> ssh yyan@10.11.200.247 -p 53425
+
+
+------------------- Setup SSH access with publickeys---------------------
+
+Generate a public/private rsa key pair, on the host machine (in terminal, outside of virtual machine):
+
+> ssh-keygen -t rsa
+
+This command will generate 2 files id_rsa and id_rsa.pub
+•id_rsa: Our private key, should be keep safely, we can crypt it with a password.
+•id_rsa.pub Our private key, you have to transfer this one to the server.
+
+Add public key to the server:
+> ssh-copy-id -i /home/yyan/.ssh/id_rsa.pub yyan@10.11.200.247 -p 53425
+
+The key is automatically added in ~/.ssh/authorized_keys on the server.
+
+Disable password authentication and root login:
+> Sudo vim /etc/ssh/sshd_config
+
+Change:
+
+“#PermitRootLogin prohibit-password
+#PasswordAuthentication yes
+#PubkeyAuthentication yes
+” to:
+
+“PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+”
+
+Restart the ssh service:
+> sudo service sshd restart
+
+Now when we login with “ssh yyan@10.11.200.247 -p 53425”, we should use the password for private key.
+
+
+
+---------------------- Setup a Firewall---------------------------
+
+Allow incoming traffic to ssh (our 53425port), http and https:
+
+> sudo ufw enable
+> sudo ufw default deny incoming
+> sudo ufw default allow outgoing
+> sudo ufw allow 443
+> sudo ufw allow 80/tcp
+> sudo ufw allow 53425/tcp
+
+Note that port 80/tcp is HTTP (only for TCP not UDP), 443 is HTTPS, and 53425 is SSH.
+
+Restart ufw service:
+> sudo ufw reload
+
+
+
+----------------------- Set up dos protection with fail2ban-------------------
+
+Check current rules:
+> service fail2ban status
+> sudo cat /etc/fail2ban/jail.d/defaults-debian.conf
+
+Add rules to local file to add to and override default rules
+, also local rules won't get overwritten when updated.
+
+Add the following to the /etc/fail2ban/jail.d/jail-debian.local by:
+>sudo vim /etc/fail2ban/jail.d/jail-debian.local
+
+“        [sshd]
+        enabled = true
+        port = 53425
+		logpath = %(sshd_log)s
+		backend = %(sshd_backend)s
+        maxretry = 3
+        findtime = 120
+        bantime = 600
+
+        [http-get-dos]
+        enabled = true
+        port = http,https
+        filter = http-get-dos
+		logpath = /var/log/apache2/access.log
+        maxretry = 100
+        findtime = 120
+        bantime = 600
+        action = iptables[name=HTTP, port=http, protocol=tcp] ”
+
+or copy from resources/jail-debian.local
+
+Add regex rules to http-get-dos:
+
+Create a file:
+> sudo touch /etc/fail2ban/filter.d/http-get-dos.conf
+
+And edit it :
+
+      “ [Definition]
+        failregex = ^<HOST> -.*"(GET|POST).*
+        ignoreregex = “
+
+or copy from resources/http-get-dos.conf
+
+
+Regular expressions are used to detect break-in attempts,
+password failures, etc. Regular expressions are looked to
+see if they match the lines of the logfile.
+You can use the predefined entity <HOST> in your regexes.
+<HOST> is an alias for (?:::f{4,6}:)?(?P<host>\S+),
+which matches either a hostname or an IPv4 address
+(possibly embedded in an IPv6 address).
+
+If the failregex is anchored with a leading ^, then the
+anchor refers to the start of the remainder of the line,
+after the timestamp and intervening whitespace.
+
+Restart firewall and fail2ban:
+> sudo ufw reload
+> sudo service fail2ban restart
+
+
+------------------- Protection against scans on open ports----------------------
+
+In standard mode portsentry runs in the background and reports any violations,
+in Stealth modes, PortSentry will use a raw socket to monitor all incoming
+packets, and if a monitored port is probed, it will block the host.
+
+The most sensitive modes are those used by Advanced Stealth scan detection.
+You can explicitly ask PortSentry to ignore certain ports
+(which can be key when running a particularly reactionary configuration)
+to protect legitimate traffic. By default, PortSentry pays most attention
+to the first 1024 ports (otherwise known as privileged ports)
+because that’s where non-ephemeral connections usually originate from daemons.
+
+> sudo vim /etc/default/portsentry
+
+change tcp and udp to atcp and aupd (advanced) or overwrite with file resources/portsentry
+
+
+> sudo vim /etc/portsentry/portsentry.conf
+or copy the file from resources/portsentry.conf
+
+Ignore Options are:
+
+# 0 = Do not block UDP/TCP scans. (log only)
+# 1 = Block UDP/TCP scans.
+# 2 = Run external command only (KILL_RUN_CMD)
+
+so set:
+BLOCK_UDP="0"
+BLOCK_TCP="0"
+to
+BLOCK_UDP="1"
+BLOCK_TCP="1"
+
+We opt for a blocking of malicious persons through iptables.
+We will therefore comment on all lines of the configuration file that begin with KILL_ROUTE except the next:
+
+KILL_ROUTE="/sbin/iptables -I INPUT -s $TARGET$ -j DROP"
+This will drop all packets originating from an attacker’s IP address.
+
+Restart the service:
+> sudo service portsentry restart
+
+
+-------------------------Stop unnecessary services------------------------------
+
+> sudo systemctl disable console-setup.service
+// This package provides the console with the same keyboard configuration scheme as the X Window System.
+> sudo systemctl disable keyboard-setup.service
+// To configure the keyboard, and slow at boot.
+> sudo systemctl disable apt-daily.timer
+> sudo systemctl disable apt-daily-upgrade.timer
+// both check the package update, are not necessary and take long time when bootup.
+
+Check all the enabled service by:
+> sudo systemctl list-unit-files --type service | grep enabled
+
+
+-------------------------------Update Packages with cron----------------------------------
+
+create log file
+> sudo touch /var/log/update_script.log
+> sudo chmod 777 /var/log/update_script.log
+
+Create and edit update.sh:
+> sudo vim update.sh
+
+Add:
+“sudo apt-get update -y >> /var/log/update_script.log
+sudo apt-get upgrade -y >> /var/log/update_script.log”
+
+Change file mode:
+> sudo chmod 755 update.sh
+
+Add task to cron:
+
+> sudo crontab -e
+Add:
+"@reboot sudo ~/update.sh
+0 4 * * 6 sudo ~/update.sh"
+
+Enable cron:
+> sudo systemctl enable cron
+
+
+------------------------------Monitor file change with cron-------------------------------
+Create and edit ~/cronmonitor.sh like:
+> vim ~/cronmonitor.sh
+
+//CONTENT
+#!/bin/bash
+
+FILE="/home/yyan/crontab_monitor"
+FILE_TO_MONITOR="/etc/crontab"
+
+MD5=$(sudo md5sum $FILE_TO_MONITOR)
+
+if [ ! -f $FILE ]
+then
+	echo "$MD5" > $FILE
+	exit 0;
+fi;
+
+if [ "$MD5" != "$(sudo cat $FILE)" ]
+then
+	echo "$MD5" > $FILE
+	echo "$FILE_TO_MONITOR has been changed! 0_0! Be careful." | mail -s "$FILE_TO_MONITOR was changed!" root
+fi;
+//END OF CONTENT
+
+Change file mode:
+> sudo chmod 755 cronmonitor.sh
+
+Add task to crontab:
+> sudo crontab -e
+0 0 * * * sudo /home/yyan/cronmonitor.sh
+
+Test the task by using * * * * * rule to execute the sh file per minute.
+
+Read the email by "mail" or read the latest by "echo p | mail".
+
+
+-------------------------------Add webpage------------------------
+
+Apache is installed, so you can check if there is apache default web page
+by going with browser to
+10.11.200.247
+if site is not there restart apache with
+> sudo service apache2 restart
+
+Create a folder in the root directory of Debian to put all files needed for our own webpage.
+>cd
+>mkdir webpage
+
+Come to mac terminal and cd to the folder where these file are located:
+>scp -P 53425 * yyan@10.11.200.247:/home/yyan/webpage
+These files are now copied to the Debian folder webpage.
+
+Back in Debian:
+> cd webpage
+> sudo cp * /var/www/html/
+
+Our own webpage are now available on 10.11.200.247.
+
+
+
+----------------------------Self-signed SSL certificate----------------------
+
+> sudo mkdir -p /etc/ssl/localcerts
+Make a separate dir for the self-signed SSL certificate.
+
+> sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 -out /etc/ssl/localcerts/apache.pem -keyout /etc/ssl/localcerts/apache.key
+
+>sudo chmod 600 /etc/ssl/localcerts/apache*
+
+> sudo vim /etc/apache2/conf-available/ssl-params.conf
+Create ssl-params.conf with content from resources/ssl-params.conf
+
+> sudo vim /etc/apache2/sites-available/default-ssl.conf
+Edit default-ssl.conf with content from resources/default-ssl.conf
+
+> sudo vim /etc/apache2/sites-available/000-default.conf
+Edit 000-default.conf with content from resources/000-default.conf
+
+And to load our new config run those commands:
+>sudo a2enmod ssl
+>sudo a2enmod headers
+>sudo a2ensite default-ssl
+>sudo a2enconf ssl-params
+>systemctl reload apache2
+
+---------------------Deployment automation for webpage---------------
+
+Bash script ~/update_web.sh was created for webpage deployment automation:
+> sudo vim ~/update_web.sh
+Add:
+// CONTENT
+#!/bin/bash
+
+DIFFHTML=$(sudo diff /home/yyan/webpage/index.html /var/www/html/index.html)
+DIFFCSS= $(sudo diff /home/yyan/webpage/style.css /var/www/html/style.css)
+
+if [ "$DIFFHTML" != "" ]
+then
+	sudo cp /home/yyan/webpage/index.html /var/www/html/index.html
+	echo "Webpage html get updated!" | mail -s "Web deployment" root
+fi;
+
+if [ "$DIFFCSS" != "" ]
+then
+	sudo cp /home/yyan/webpage/style.css /var/www/html/style.css
+	echo "Webpage css get updated!" | mail -s "Web deployment" root
+fi;
+// END OF CONTENT
+
+The task of execute this bash file is also added in cron :
+>sudo crontab -e
+Add:
+"* * * * * sudo /home/yyan/update_web.sh"
+
+Thus, this task is executing every minute, and once the file in webpage/ folder get changed, the webpage will be update according to the change and a mail will be send to root reminding the change.
+
+
+
