@@ -1,2 +1,3 @@
 # roger-skyline
-This project requires the knowledge with some of the basic commands and first reflexes in system and network administration.
+
+This project aims to familiarize us with the work of a sysadmin. We were asked to configure a linux distribution with some basics services like OpenSSH, Fail2Ban, a web server (Aphache).
